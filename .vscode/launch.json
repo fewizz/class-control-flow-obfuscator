@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "ControlFlowObfuscator",
+            "request": "launch",
+            "mainClass": "ru.fewizz.ControlFlowObfuscator",
+            "projectName": "app",
+            "args": ["demo/Fibonacci.class", "demo/obfuscated/Fibonacci.class"]
+        },
+        {
+            "type": "java",
+            "name": "ASMifier",
+            "request": "launch",
+            "mainClass": "org.objectweb.asm.util.ASMifier",
+            "projectName": "app",
+            "args": ["demo/Fibonacci.class"]
+        }
+    ]
+}
