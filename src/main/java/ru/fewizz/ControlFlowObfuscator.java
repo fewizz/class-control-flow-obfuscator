@@ -14,7 +14,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Random;
-
+import java.util.function.Consumer;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -31,32 +31,29 @@ public class ControlFlowObfuscator implements Opcodes {
         var classNode = new ClassNode();
         classReader.accept(classNode, 0);
 
-        MethodNode methodNode = classNode.methods.stream()
-            .filter(m -> m.name.equals("fib"))
-            .findFirst().get();
-
-        methodNode.maxStack = 65536;
-
-        var analyzer = new Analyzer<>(new BasicInterpreter());
-        var frames = new ArrayList<Frame<BasicValue>>(
-            Arrays.asList(analyzer.analyze(classNode.name, methodNode))
-        );
-
         Random random = new Random(0);
 
-        for (int i = 0; i < 256; ++i) {
-            insertFakeBranch(
-                classNode,
-                methodNode,
-                frames,
-                random.nextInt(methodNode.instructions.size()),
-                random.nextInt(methodNode.instructions.size())
+        for (MethodNode methodNode : classNode.methods) {
+            var analyzer = new Analyzer<>(new BasicInterpreter());
+            var frames = new ArrayList<Frame<BasicValue>>(
+                Arrays.asList(analyzer.analyze(classNode.name, methodNode))
             );
+
+            methodNode.maxStack = 65535; // it will be recomputed
+            int count = methodNode.instructions.size() / 4;
+
+            for (int i = 0; i < count; ++i) {
+                insertFakeBranch(
+                    classNode,
+                    methodNode,
+                    frames,
+                    random.nextInt(methodNode.instructions.size()),
+                    random.nextInt(methodNode.instructions.size())
+                );
+            }
         }
 
-        var classWriter = new ClassWriter(
-            ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS
-        );
+        var classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         classNode.accept(classWriter);
         classFileBytes = classWriter.toByteArray();
 
@@ -71,29 +68,40 @@ public class ControlFlowObfuscator implements Opcodes {
         Frame<BasicValue> srcFrame = frames.get(at);
         Frame<BasicValue> dstFrame = frames.get(to);
 
+        if (srcFrame == null || dstFrame == null) {
+            return;
+        }
+
         AbstractInsnNode srcInsn = methodNode.instructions.get(at);
         AbstractInsnNode dstInsn = methodNode.instructions.get(to);
 
         Label fakeInsnsEndLabel = new Label();
-        InsnList insns = new InsnList();
-        ArrayList<Frame<BasicValue>> fakeFrames = new ArrayList<>();
+        var fakeInsns = new InsnList();
+        var fakeFrames = new ArrayList<Frame<BasicValue>>();
 
-        Frame<BasicValue> frame = new Frame<>(srcFrame);
-        fakeFrames.add(frame);
+        final Frame<BasicValue> frame = new Frame<>(srcFrame);
+
+        Consumer<AbstractInsnNode> addInsn = (AbstractInsnNode insn) -> {
+            fakeInsns.add(insn);
+            fakeFrames.add(new Frame<>(frame));
+            if (insn instanceof LabelNode) {
+                // nothin
+            }
+            else {
+                try {
+                    frame.execute(insn, new BasicInterpreter());
+                } catch (AnalyzerException e) {
+                    e.printStackTrace();
+                }
+            }
+        };
 
         if (srcFrame.getStackSize() == srcFrame.getMaxStackSize()) {
             return;
         }
 
-        insns.add(new InsnNode(ICONST_0));
-        frame = new Frame<>(frame);
-        frame.push(INT_VALUE);
-        fakeFrames.add(frame);
-
-        insns.add(new JumpInsnNode(IFEQ, new LabelNode(fakeInsnsEndLabel)));
-        frame = new Frame<>(frame);
-        frame.pop();
-        fakeFrames.add(frame);
+        addInsn.accept(new InsnNode(ICONST_0));
+        addInsn.accept(new JumpInsnNode(IFEQ, new LabelNode(fakeInsnsEndLabel)));
 
         if (frame.getStackSize() != srcFrame.getStackSize()) {
             throw new RuntimeException();
@@ -102,115 +110,72 @@ public class ControlFlowObfuscator implements Opcodes {
 
         for (int i = 0; i < dstFrame.getLocals(); ++i) {
             var value = dstFrame.getLocal(i);
+            if (value == REFERENCE_VALUE) {
+                return;
+            }
+
+            if (dstFrame.getLocal(i) == srcFrame.getLocal(i)) {
+                continue;
+            }
 
             if (value == UNINITIALIZED_VALUE) {
                 continue;
             }
 
             if (value == DOUBLE_VALUE) {
-                /*insns.add(new InsnNode(DCONST_0));
-                frame = new Frame<>(frame);
-                frame.push(DOUBLE_VALUE);
-                fakeFrames.add(frame);
-
-                insns.add(new VarInsnNode(DSTORE, i));
-                frame = new Frame<>(frame);
-                frame.pop();
-                frame.setLocal(i, DOUBLE_VALUE);
-                fakeFrames.add(frame);*/
-                throw new RuntimeException();
+                addInsn.accept(new InsnNode(DCONST_0));
+                addInsn.accept(new VarInsnNode(FSTORE, i));
             }
             else if (value == FLOAT_VALUE) {
-                insns.add(new InsnNode(FCONST_0));
-                frame = new Frame<>(frame);
-                frame.push(FLOAT_VALUE);
-                fakeFrames.add(frame);
-
-                insns.add(new VarInsnNode(FSTORE, i));
-                frame = new Frame<>(frame);
-                frame.pop();
-                frame.setLocal(i, FLOAT_VALUE);
-                fakeFrames.add(frame);
+                addInsn.accept(new InsnNode(FCONST_0));
+                addInsn.accept(new VarInsnNode(FSTORE, i));
             }
             else if (value == LONG_VALUE) {
-                /*insns.add(new InsnNode(LCONST_0));
-                frame = new Frame<>(frame);
-                frame.push(LONG_VALUE);
-                fakeFrames.add(frame);
-
-                insns.add(new VarInsnNode(LSTORE, i));
-                frame = new Frame<>(frame);
-                frame.pop();
-                frame.setLocal(i, LONG_VALUE);
-                fakeFrames.add(frame);*/
-                throw new RuntimeException();
+                addInsn.accept(new InsnNode(LCONST_0));
+                addInsn.accept(new VarInsnNode(LSTORE, i));
             }
             else if (value == INT_VALUE) {
-                insns.add(new InsnNode(ICONST_0));
-                frame = new Frame<>(frame);
-                frame.push(INT_VALUE);
-                fakeFrames.add(frame);
-
-                insns.add(new VarInsnNode(ISTORE, i));
-                frame = new Frame<>(frame);
-                frame.pop();
-                frame.setLocal(i, INT_VALUE);
-                fakeFrames.add(frame);
+                addInsn.accept(new InsnNode(ICONST_0));
+                addInsn.accept(new VarInsnNode(ISTORE, i));
             }
             else if (value == REFERENCE_VALUE) {
-                insns.add(new InsnNode(ACONST_NULL));
-                frame = new Frame<>(frame);
-                frame.push(REFERENCE_VALUE);
-                fakeFrames.add(frame);
-
-                insns.add(new VarInsnNode(ASTORE, i));
-                frame = new Frame<>(frame);
-                frame.pop();
-                frame.setLocal(i, REFERENCE_VALUE);
-                fakeFrames.add(frame);
+                throw new RuntimeException(); // impossible
             }
             else {
                 throw new RuntimeException();
             }
-        }
-
-        for (int i = srcFrame.getStackSize() - 1; i >= 0 ; --i) {
-            var value = srcFrame.getStack(i);
-            if (value == DOUBLE_VALUE || value == LONG_VALUE) {
-                insns.add(new InsnNode(POP2));
-            }
-            else {
-                insns.add(new InsnNode(POP));
-            }
-            frame = new Frame<>(frame);
-            frame.pop();
-            fakeFrames.add(frame);
         }
 
         for (int i = 0; i < dstFrame.getStackSize(); ++i) {
-            frame = new Frame<>(frame);
             var value = dstFrame.getStack(i);
-            if (value == DOUBLE_VALUE) {
-                insns.add(new InsnNode(DCONST_0));
-                frame.push(DOUBLE_VALUE);
+            if (value == REFERENCE_VALUE) return;
+        }
+
+        int diffIndex = 0;
+        for (; diffIndex < srcFrame.getStackSize() && diffIndex < dstFrame.getStackSize(); ++diffIndex) {
+            if (srcFrame.getStack(diffIndex) != dstFrame.getStack(diffIndex)) {
+                break;
             }
-            else if (value == FLOAT_VALUE) {
-                insns.add(new InsnNode(FCONST_0));
-                frame.push(FLOAT_VALUE);
-            }
-            else if (value == LONG_VALUE) {
-                insns.add(new InsnNode(LCONST_0));
-                frame.push(LONG_VALUE);
-            }
-            else if (value == INT_VALUE) {
-                insns.add(new InsnNode(ICONST_0));
-                frame.push(INT_VALUE);
+        }
+
+        for (int i = srcFrame.getStackSize() - 1; i >= diffIndex ; --i) {
+            var value = srcFrame.getStack(i);
+            if (value == DOUBLE_VALUE || value == LONG_VALUE) {
+                addInsn.accept(new InsnNode(POP2));
             }
             else {
-                insns.add(new InsnNode(ACONST_NULL));
-                frame.push(REFERENCE_VALUE);
+                addInsn.accept(new InsnNode(POP));
             }
-            fakeFrames.add(frame);
+        }
+
+        for (int i = diffIndex; i < dstFrame.getStackSize(); ++i) {
+            var value = dstFrame.getStack(i);
+            if (value == DOUBLE_VALUE) addInsn.accept(new InsnNode(DCONST_0));
+            else if (value == FLOAT_VALUE) addInsn.accept(new InsnNode(FCONST_0));
+            else if (value == LONG_VALUE) addInsn.accept(new InsnNode(LCONST_0));
+            else if (value == INT_VALUE) addInsn.accept(new InsnNode(ICONST_0));
+            else if (value == REFERENCE_VALUE) addInsn.accept(new InsnNode(ACONST_NULL));
+            else throw new RuntimeException();
         }
 
         LabelNode dstLabelInsn;
@@ -227,15 +192,16 @@ public class ControlFlowObfuscator implements Opcodes {
             methodNode.instructions.insertBefore(dstInsn, dstLabelInsn);
         }
 
-        insns.add(new JumpInsnNode(GOTO, dstLabelInsn));
-        fakeFrames.add(new Frame<>(srcFrame));
-        insns.add(new LabelNode(fakeInsnsEndLabel));
+        addInsn.accept(new JumpInsnNode(GOTO, dstLabelInsn));
 
-        if (insns.size() != fakeFrames.size())
+        frame.init(srcFrame);
+        addInsn.accept(new LabelNode(fakeInsnsEndLabel));
+
+        if (fakeInsns.size() != fakeFrames.size())
             throw new RuntimeException();
 
         frames.addAll(methodNode.instructions.indexOf(srcInsn), fakeFrames);
-        methodNode.instructions.insertBefore(srcInsn, insns);
+        methodNode.instructions.insertBefore(srcInsn, fakeInsns);
 
         if (methodNode.instructions.size() != frames.size())
             throw new RuntimeException();

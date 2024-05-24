@@ -9,8 +9,21 @@
             "name": "ControlFlowObfuscator",
             "request": "launch",
             "mainClass": "ru.fewizz.ControlFlowObfuscator",
-            "projectName": "app",
             "args": ["demo/Fibonacci.class", "demo/obfuscated/Fibonacci.class"]
+        },
+        {
+            "type": "java",
+            "name": "BUNO Game",
+            "request": "launch",
+            "mainClass": "ru.fewizz.ControlFlowObfuscator",
+            "args": [
+                "C:/msys64/home/Aidar.Khazeev/BUNO/build/classes/java/main/com/ambrosia/buno/Game.class",
+                "C:/msys64/home/Aidar.Khazeev/BUNO/build/classes/java/main/com/ambrosia/buno/Game.class"
+            ],
+            "classPaths": [
+                "$Auto",
+                "C:/msys64/home/Aidar.Khazeev/BUNO/build/classes/java/main"
+            ]
         },
         {
             "type": "java",
