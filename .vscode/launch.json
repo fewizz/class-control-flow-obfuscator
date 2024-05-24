@@ -9,7 +9,11 @@
             "name": "ControlFlowObfuscator",
             "request": "launch",
             "mainClass": "ru.fewizz.ControlFlowObfuscator",
-            "args": ["demo/Fibonacci.class", "demo/obfuscated/Fibonacci.class"]
+            "classPaths": [
+                "$Auto",
+                "D:/Diploma/class-control-flow-obfuscator/demo"
+            ],
+            "args": ["demo/SimpleClass.class", "demo/obfuscated/SimpleClass.class"]
         },
         {
             "type": "java",

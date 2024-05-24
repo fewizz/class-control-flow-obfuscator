@@ -3,18 +3,13 @@
  */
 package ru.fewizz;
 
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.*;
 import static org.objectweb.asm.tree.analysis.BasicValue.*;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Random;
-import java.util.function.Consumer;
+import java.util.*;
+import java.util.function.*;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -30,25 +25,71 @@ public class ControlFlowObfuscator implements Opcodes {
         var classReader = new ClassReader(classFileBytes);
         var classNode = new ClassNode();
         classReader.accept(classNode, 0);
+        Interpreter<BasicValue> interpreter = new SimpleVerifier();
 
         Random random = new Random(0);
 
         for (MethodNode methodNode : classNode.methods) {
-            var analyzer = new Analyzer<>(new BasicInterpreter());
+            if (methodNode.name.equals("<init>")) {
+                continue;
+            }
+            methodNode.maxStack = 65535; // it will be recomputed
+
+            var analyzer = new Analyzer<>(interpreter);
             var frames = new ArrayList<Frame<BasicValue>>(
                 Arrays.asList(analyzer.analyze(classNode.name, methodNode))
             );
+            Set<AbstractInsnNode> allowed = new HashSet<>();
 
-            methodNode.maxStack = 65535; // it will be recomputed
-            int count = methodNode.instructions.size() / 4;
+            for (
+                AbstractInsnNode insn = methodNode.instructions.getFirst();
+                insn.getNext() != null;
+                insn = insn.getNext()
+            ) {
+                if (frames.get(methodNode.instructions.indexOf(insn)) == null) {
+                    continue;
+                }
 
-            for (int i = 0; i < count; ++i) {
+                if (insn instanceof LineNumberNode || insn instanceof FrameNode) {
+                    continue;
+                }
+
+                if (insn.getOpcode() == NEW) {
+                    insn = insn.getNext();
+
+                    if (insn == null || insn.getOpcode() != DUP) {
+                        throw new RuntimeException();
+                    }
+                    insn = insn.getNext();
+
+                    while (insn.getOpcode() != INVOKESPECIAL) {
+                        insn = insn.getNext();
+                    }
+                    insn = insn.getNext();
+                }
+
+                allowed.add(insn);
+            }
+
+            Supplier<AbstractInsnNode> popAllowedRandom = () -> {
+                var allowedList = new ArrayList<>(allowed);
+                AbstractInsnNode insn = allowedList.get(
+                    random.nextInt(allowedList.size())
+                );
+                allowed.remove(insn);
+                return insn;
+            };
+
+            while (allowed.size() >= 2) {
+                var src = popAllowedRandom.get();
+                var dst = popAllowedRandom.get();
+
                 insertFakeBranch(
                     classNode,
                     methodNode,
                     frames,
-                    random.nextInt(methodNode.instructions.size()),
-                    random.nextInt(methodNode.instructions.size())
+                    interpreter,
+                    src, dst
                 );
             }
         }
@@ -63,17 +104,12 @@ public class ControlFlowObfuscator implements Opcodes {
     static void insertFakeBranch(
         ClassNode classNode, MethodNode methodNode,
         ArrayList<Frame<BasicValue>> frames,
-        int at, int to
+        Interpreter<BasicValue> interpreter,
+        AbstractInsnNode srcInsn, AbstractInsnNode dstInsn
     ) throws AnalyzerException {
-        Frame<BasicValue> srcFrame = frames.get(at);
-        Frame<BasicValue> dstFrame = frames.get(to);
-
-        if (srcFrame == null || dstFrame == null) {
-            return;
-        }
-
-        AbstractInsnNode srcInsn = methodNode.instructions.get(at);
-        AbstractInsnNode dstInsn = methodNode.instructions.get(to);
+        var insns = methodNode.instructions;
+        Frame<BasicValue> srcFrame = frames.get(insns.indexOf(srcInsn));
+        Frame<BasicValue> dstFrame = frames.get(insns.indexOf(dstInsn));
 
         Label fakeInsnsEndLabel = new Label();
         var fakeInsns = new InsnList();
@@ -89,16 +125,12 @@ public class ControlFlowObfuscator implements Opcodes {
             }
             else {
                 try {
-                    frame.execute(insn, new BasicInterpreter());
+                    frame.execute(insn, interpreter);
                 } catch (AnalyzerException e) {
                     e.printStackTrace();
                 }
             }
         };
-
-        if (srcFrame.getStackSize() == srcFrame.getMaxStackSize()) {
-            return;
-        }
 
         addInsn.accept(new InsnNode(ICONST_0));
         addInsn.accept(new JumpInsnNode(IFEQ, new LabelNode(fakeInsnsEndLabel)));
@@ -110,11 +142,8 @@ public class ControlFlowObfuscator implements Opcodes {
 
         for (int i = 0; i < dstFrame.getLocals(); ++i) {
             var value = dstFrame.getLocal(i);
-            if (value == REFERENCE_VALUE) {
-                return;
-            }
 
-            if (dstFrame.getLocal(i) == srcFrame.getLocal(i)) {
+            if (value.equals(srcFrame.getLocal(i))) {
                 continue;
             }
 
@@ -138,22 +167,16 @@ public class ControlFlowObfuscator implements Opcodes {
                 addInsn.accept(new InsnNode(ICONST_0));
                 addInsn.accept(new VarInsnNode(ISTORE, i));
             }
-            else if (value == REFERENCE_VALUE) {
-                throw new RuntimeException(); // impossible
-            }
             else {
-                throw new RuntimeException();
+                addInsn.accept(new InsnNode(ACONST_NULL));
+                addInsn.accept(new TypeInsnNode(CHECKCAST, value.getType().getInternalName()));
+                addInsn.accept(new VarInsnNode(ASTORE, i));
             }
-        }
-
-        for (int i = 0; i < dstFrame.getStackSize(); ++i) {
-            var value = dstFrame.getStack(i);
-            if (value == REFERENCE_VALUE) return;
         }
 
         int diffIndex = 0;
         for (; diffIndex < srcFrame.getStackSize() && diffIndex < dstFrame.getStackSize(); ++diffIndex) {
-            if (srcFrame.getStack(diffIndex) != dstFrame.getStack(diffIndex)) {
+            if (!srcFrame.getStack(diffIndex).equals(dstFrame.getStack(diffIndex))) {
                 break;
             }
         }
@@ -174,8 +197,10 @@ public class ControlFlowObfuscator implements Opcodes {
             else if (value == FLOAT_VALUE) addInsn.accept(new InsnNode(FCONST_0));
             else if (value == LONG_VALUE) addInsn.accept(new InsnNode(LCONST_0));
             else if (value == INT_VALUE) addInsn.accept(new InsnNode(ICONST_0));
-            else if (value == REFERENCE_VALUE) addInsn.accept(new InsnNode(ACONST_NULL));
-            else throw new RuntimeException();
+            else {
+                addInsn.accept(new InsnNode(ACONST_NULL));
+                addInsn.accept(new TypeInsnNode(CHECKCAST, value.getType().getInternalName()));
+            }
         }
 
         LabelNode dstLabelInsn;
@@ -185,11 +210,8 @@ public class ControlFlowObfuscator implements Opcodes {
         }
         else {
             dstLabelInsn = new LabelNode();
-            frames.add(
-                methodNode.instructions.indexOf(dstInsn),
-                new Frame<>(dstFrame)
-            );
-            methodNode.instructions.insertBefore(dstInsn, dstLabelInsn);
+            frames.add(insns.indexOf(dstInsn), new Frame<>(dstFrame));
+            insns.insertBefore(dstInsn, dstLabelInsn);
         }
 
         addInsn.accept(new JumpInsnNode(GOTO, dstLabelInsn));
@@ -200,10 +222,10 @@ public class ControlFlowObfuscator implements Opcodes {
         if (fakeInsns.size() != fakeFrames.size())
             throw new RuntimeException();
 
-        frames.addAll(methodNode.instructions.indexOf(srcInsn), fakeFrames);
-        methodNode.instructions.insertBefore(srcInsn, fakeInsns);
+        frames.addAll(insns.indexOf(srcInsn), fakeFrames);
+        insns.insertBefore(srcInsn, fakeInsns);
 
-        if (methodNode.instructions.size() != frames.size())
+        if (insns.size() != frames.size())
             throw new RuntimeException();
     }
 
