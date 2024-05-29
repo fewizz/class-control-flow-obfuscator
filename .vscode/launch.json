@@ -31,6 +31,20 @@
         },
         {
             "type": "java",
+            "name": "Entire BUNO",
+            "request": "launch",
+            "mainClass": "ru.fewizz.ControlFlowObfuscator",
+            "args": [
+                "C:/msys64/home/Aidar.Khazeev/BUNO/build/classes/java/main/",
+                "demo/BUNO/"
+            ],
+            "classPaths": [
+                "$Auto",
+                "C:/msys64/home/Aidar.Khazeev/BUNO/build/classes/java/main"
+            ]
+        },
+        {
+            "type": "java",
             "name": "ASMifier",
             "request": "launch",
             "mainClass": "org.objectweb.asm.util.ASMifier",

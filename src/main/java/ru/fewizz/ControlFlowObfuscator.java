@@ -16,96 +16,154 @@ import java.nio.file.Files;
 
 public class ControlFlowObfuscator implements Opcodes {
 
-    public static void main(String[] args) throws IOException, AnalyzerException {
-        Path srcClassFilePath = Paths.get(args[0]);
-        Path dstClassFilePath = Paths.get(args[1]);
+    public static void main(String[] args) throws IOException {
+        Path src = Paths.get(args[0]);
+        Path dst = Paths.get(args[1]);
 
-        byte[] classFileBytes = Files.readAllBytes(srcClassFilePath);
+        // Если на вход подается путь до файла,
+        // то обрабатывается только один файл
+        if (!Files.isDirectory(src)) {
+            handleFile(src, dst);
+            return; // Выход из программы
+        }
 
-        var classReader = new ClassReader(classFileBytes);
+        // Рекурсивно обрабатываются все файлы в исходной директории
+        Files.walk(src).forEach(srcFile -> {
+            if (Files.isDirectory(srcFile))
+                return;
+            Path dstFile = dst.resolve(src.relativize(srcFile));
+            handleFile(srcFile, dstFile);
+        });
+    }
+
+    private static void handleFile(Path src, Path dst) {
+         try {
+            // Создание директории назначения
+            Files.createDirectories(dst.getParent());
+
+            // 1. Чтение байтов исходного класс-файла
+            byte[] classFileBytes = Files.readAllBytes(src);
+
+            // 2. Обработка класса
+            classFileBytes = transform(classFileBytes);
+
+            // 3. Запись байтов класс-файла в файл назначения
+            Files.write(dst, classFileBytes);
+
+        } catch (IOException | AnalyzerException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static byte[] transform(byte[] classFileBytes) throws AnalyzerException {
+        // Создание представления класса в виде объекта
         var classNode = new ClassNode();
-        classReader.accept(classNode, 0);
+        new ClassReader(classFileBytes).accept(classNode, 0);
+
         Interpreter<BasicValue> interpreter = new SimpleVerifier();
 
+        // Псевдослучайный генератор случайных чисел,
+        // для определения позиции свободной для обработки функции
         Random random = new Random(0);
 
+        // Прохождение по всем методам класса
         for (MethodNode methodNode : classNode.methods) {
-            if (methodNode.name.equals("<init>")) {
+            // Пропускаем конструкторы, либо методы,
+            // не имеющие инструкций (нативные, абстрактные и т.д.)
+            if (methodNode.name.equals("<init>") || methodNode.instructions.getFirst() == null) {
                 continue;
             }
-            methodNode.maxStack = 65535; // it will be recomputed
 
+            // Максимальный размер стека метода выставляется на максимальное значение,
+            // позже будет перерасчитан
+            methodNode.maxStack = 65535;
+
+            // Анализируется использование стека и локальных переменных
             var analyzer = new Analyzer<>(interpreter);
-            var frames = new ArrayList<Frame<BasicValue>>(
-                Arrays.asList(analyzer.analyze(classNode.name, methodNode))
-            );
-            Set<AbstractInsnNode> allowed = new HashSet<>();
+            var frames = Arrays.asList(analyzer.analyze(classNode.name, methodNode));
 
-            for (
-                AbstractInsnNode insn = methodNode.instructions.getFirst();
-                insn.getNext() != null;
-                insn = insn.getNext()
-            ) {
-                if (frames.get(methodNode.instructions.indexOf(insn)) == null) {
-                    continue;
-                }
+            // Получение множества разрешенных для обработки инструкций
+            Set<AbstractInsnNode> available = collectAllowedInsns(methodNode, frames);
 
-                if (insn instanceof LineNumberNode || insn instanceof FrameNode) {
-                    continue;
-                }
-
-                if (insn.getOpcode() == NEW) {
-                    insn = insn.getNext();
-
-                    if (insn == null || insn.getOpcode() != DUP) {
-                        throw new RuntimeException();
-                    }
-                    insn = insn.getNext();
-
-                    while (insn.getOpcode() != INVOKESPECIAL) {
-                        insn = insn.getNext();
-                    }
-                    insn = insn.getNext();
-                }
-
-                allowed.add(insn);
-            }
-
-            Supplier<AbstractInsnNode> popAllowedRandom = () -> {
-                var allowedList = new ArrayList<>(allowed);
-                AbstractInsnNode insn = allowedList.get(
-                    random.nextInt(allowedList.size())
-                );
-                allowed.remove(insn);
+            // Функция для случайного "вынимания" из множества
+            // одной свободной инструкции
+            Supplier<AbstractInsnNode> popRandomAllowedInsn = () -> {
+                var allowedList = new ArrayList<>(available);
+                int index = random.nextInt(allowedList.size());
+                AbstractInsnNode insn = allowedList.get(index);
+                available.remove(insn);
                 return insn;
             };
 
-            while (allowed.size() >= 2) {
-                var src = popAllowedRandom.get();
-                var dst = popAllowedRandom.get();
-
+            // Выбираются две случайные инструкции, и между ними устанавливается
+            // ложная связь
+            while (available.size() >= 2) {
+                var src = popRandomAllowedInsn.get();
+                var dst = popRandomAllowedInsn.get();
                 insertFakeBranch(
-                    classNode,
-                    methodNode,
-                    frames,
-                    interpreter,
-                    src, dst
+                    classNode, methodNode, frames,
+                    interpreter, src, dst
                 );
             }
         }
 
+        // Обратное преобразование объекта класс-файла в байты,
+        // С перерсчетом максимального размера стека и фреймов
         var classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         classNode.accept(classWriter);
         classFileBytes = classWriter.toByteArray();
 
-        Files.write(dstClassFilePath, classFileBytes);
+        return classFileBytes;
+    }
+
+    private static Set<AbstractInsnNode> collectAllowedInsns(
+        MethodNode methodNode,
+        List<Frame<BasicValue>> frames
+    ) {
+        Set<AbstractInsnNode> allowed = new HashSet<>();
+
+        // Прохождение по всем инструкциям метода
+        for (
+            AbstractInsnNode insn = methodNode.instructions.getFirst();
+            insn.getNext() != null;
+            insn = insn.getNext()
+        ) {
+            if (frames.get(methodNode.instructions.indexOf(insn)) == null) {
+                continue;
+            }
+            // Пропускаются псевдоинструкции
+            if (insn instanceof LineNumberNode || insn instanceof FrameNode) {
+                continue;
+            }
+
+            // Пропускается последовательность инструкций,
+            // Отвечающая за создание и инициализацию объекта
+            if (insn.getOpcode() == NEW) {
+                insn = insn.getNext();
+                if (insn == null || insn.getOpcode() != DUP) {
+                    throw new RuntimeException();
+                }
+                insn = insn.getNext();
+
+                while (insn.getOpcode() != INVOKESPECIAL) {
+                    insn = insn.getNext();
+                }
+                insn = insn.getNext();
+            }
+
+            // Доабвление свободной инструкции в множество
+            allowed.add(insn);
+        }
+
+        return allowed;
     }
 
     static void insertFakeBranch(
         ClassNode classNode, MethodNode methodNode,
-        ArrayList<Frame<BasicValue>> frames,
+        List<Frame<BasicValue>> frames,
         Interpreter<BasicValue> interpreter,
-        AbstractInsnNode srcInsn, AbstractInsnNode dstInsn
+        AbstractInsnNode srcInsn,
+        AbstractInsnNode dstInsn
     ) throws AnalyzerException {
         var insns = methodNode.instructions;
         Frame<BasicValue> srcFrame = frames.get(insns.indexOf(srcInsn));
@@ -121,7 +179,7 @@ public class ControlFlowObfuscator implements Opcodes {
             fakeInsns.add(insn);
             fakeFrames.add(new Frame<>(frame));
             if (insn instanceof LabelNode) {
-                // nothin
+                // Псевдо инструкция, пропускаем
             }
             else {
                 try {
