@@ -1,5 +1,6 @@
 plugins {
     id 'application'
+    id "me.champeau.jmh" version "0.7.2"
 }
 
 repositories {
@@ -10,6 +11,7 @@ dependencies {
     implementation 'org.ow2.asm:asm:9.7'
     implementation 'org.ow2.asm:asm-tree:9.7'
     implementation 'org.ow2.asm:asm-util:9.7'
+    implementation files("fib")
 }
 
 java {

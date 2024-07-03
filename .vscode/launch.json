@@ -17,6 +17,28 @@
         },
         {
             "type": "java",
+            "name": "FIB",
+            "request": "launch",
+            "mainClass": "ru.fewizz.ControlFlowObfuscator",
+            "classPaths": [
+                "$Auto",
+                "D:/Diploma/class-control-flow-obfuscator/demo"
+            ],
+            "args": ["demo/Fibonacci.class", "demo/obfuscated/Fibonacci.class"]
+        },
+        {
+            "type": "java",
+            "name": "FIB in src",
+            "request": "launch",
+            "mainClass": "ru.fewizz.ControlFlowObfuscator",
+            "classPaths": [
+                "$Auto",
+                "D:/Diploma/class-control-flow-obfuscator/demo"
+            ],
+            "args": ["fib/ru/fewizz/FibonacciObfuscated.class", "fib/ru/fewizz/FibonacciObfuscated.class"]
+        },
+        {
+            "type": "java",
             "name": "BUNO Game",
             "request": "launch",
             "mainClass": "ru.fewizz.ControlFlowObfuscator",

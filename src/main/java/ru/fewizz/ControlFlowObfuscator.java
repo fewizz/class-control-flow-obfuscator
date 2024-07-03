@@ -80,35 +80,58 @@ public class ControlFlowObfuscator implements Opcodes {
 
             // Анализируется использование стека и локальных переменных
             var analyzer = new Analyzer<>(interpreter);
-            var frames = Arrays.asList(analyzer.analyze(classNode.name, methodNode));
+            var frames = new ArrayList<>(
+                Arrays.asList(analyzer.analyze(classNode.name, methodNode))
+            );
+            if (false) {
+                // Получение множества разрешенных для обработки инструкций
+                Set<AbstractInsnNode> available = collectAllowedInsns(methodNode, frames);
 
-            // Получение множества разрешенных для обработки инструкций
-            Set<AbstractInsnNode> available = collectAllowedInsns(methodNode, frames);
+                // Функция для случайного "вынимания" из множества
+                // одной свободной инструкции
+                Supplier<AbstractInsnNode> popRandomAvailableInsn = () -> {
+                    var allowedList = new ArrayList<>(available);
+                    int index = random.nextInt(allowedList.size());
+                    AbstractInsnNode insn = allowedList.get(index);
+                    available.remove(insn);
+                    return insn;
+                };
 
-            // Функция для случайного "вынимания" из множества
-            // одной свободной инструкции
-            Supplier<AbstractInsnNode> popRandomAllowedInsn = () -> {
-                var allowedList = new ArrayList<>(available);
-                int index = random.nextInt(allowedList.size());
-                AbstractInsnNode insn = allowedList.get(index);
-                available.remove(insn);
-                return insn;
-            };
-
-            // Выбираются две случайные инструкции, и между ними устанавливается
-            // ложная связь
-            while (available.size() >= 2) {
-                var src = popRandomAllowedInsn.get();
-                var dst = popRandomAllowedInsn.get();
-                insertFakeBranch(
-                    classNode, methodNode, frames,
-                    interpreter, src, dst
-                );
+                // Выбираются две случайные инструкции, и между ними устанавливается
+                // ложная связь
+                while (available.size() >= 2) {
+                    var src = popRandomAvailableInsn.get();
+                    var dst = popRandomAvailableInsn.get();
+                    insertFakeBranch(
+                        classNode, methodNode, frames,
+                        interpreter, src, dst
+                    );
+                }
+            } else {
+                // Функция для случайного выбора
+                // одной разрешенной для обработки инструкции
+                Supplier<AbstractInsnNode> popRandomAllowedInsn = () -> {
+                    // Получение множества разрешенных для обработки инструкций
+                    Set<AbstractInsnNode> available = collectAllowedInsns(methodNode, frames);
+                    var availableList = new ArrayList<>(available);
+                    int index = random.nextInt(availableList.size());
+                    AbstractInsnNode insn = availableList.get(index);
+                    return insn;
+                };
+                int count = methodNode.instructions.size() / 4;
+                for (int i = 0; i < count; ++i) {
+                    var src = popRandomAllowedInsn.get();
+                    var dst = popRandomAllowedInsn.get();
+                    insertFakeBranch(
+                        classNode, methodNode, frames,
+                        interpreter, src, dst
+                    );
+                }
             }
         }
 
         // Обратное преобразование объекта класс-файла в байты,
-        // С перерсчетом максимального размера стека и фреймов
+        // С пересчетом максимального размера стека и фреймов
         var classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         classNode.accept(classWriter);
         classFileBytes = classWriter.toByteArray();
@@ -170,7 +193,7 @@ public class ControlFlowObfuscator implements Opcodes {
         Frame<BasicValue> dstFrame = frames.get(insns.indexOf(dstInsn));
 
         Label fakeInsnsEndLabel = new Label();
-        var fakeInsns = new InsnList();
+        var fakeInsns = new InsnList(); // Список новых инструкций
         var fakeFrames = new ArrayList<Frame<BasicValue>>();
 
         final Frame<BasicValue> frame = new Frame<>(srcFrame);
@@ -190,14 +213,55 @@ public class ControlFlowObfuscator implements Opcodes {
             }
         };
 
+        // на стек загружается 0
         addInsn.accept(new InsnNode(ICONST_0));
+
+        // Если значение на стеке равно 0 (всегда истинно),
+        // прыгнуть после списка добавляемых нами инструкций
         addInsn.accept(new JumpInsnNode(IFEQ, new LabelNode(fakeInsnsEndLabel)));
 
         if (frame.getStackSize() != srcFrame.getStackSize()) {
             throw new RuntimeException();
         }
-        // else, fake part
 
+        // Добавление ложного прыжка на инструкцию dst,
+        // перед эти необходимо привести стек к нужному размеру и наполнению
+        fixupStackAndLocalsUsage(srcFrame, dstFrame, addInsn);
+
+        LabelNode dstLabelInsn;
+
+        if (dstInsn instanceof LabelNode labelNode0) {
+            dstLabelInsn = labelNode0;
+        }
+        else {
+            dstLabelInsn = new LabelNode();
+            frames.add(insns.indexOf(dstInsn), new Frame<>(dstFrame));
+            insns.insertBefore(dstInsn, dstLabelInsn);
+        }
+
+        // Сам безусловный прыжок
+        addInsn.accept(new JumpInsnNode(GOTO, dstLabelInsn));
+
+        frame.init(srcFrame);
+        addInsn.accept(new LabelNode(fakeInsnsEndLabel));
+
+        if (fakeInsns.size() != fakeFrames.size())
+            throw new RuntimeException();
+
+        frames.addAll(insns.indexOf(srcInsn), fakeFrames);
+
+        // Вставка созданного списка инструкций в исходный список
+        insns.insertBefore(srcInsn, fakeInsns);
+
+        if (insns.size() != frames.size())
+            throw new RuntimeException();
+    }
+
+    private static void fixupStackAndLocalsUsage(
+        Frame<BasicValue> srcFrame,
+        Frame<BasicValue> dstFrame,
+        Consumer<AbstractInsnNode> addInsn
+    ) {
         for (int i = 0; i < dstFrame.getLocals(); ++i) {
             var value = dstFrame.getLocal(i);
 
@@ -260,31 +324,6 @@ public class ControlFlowObfuscator implements Opcodes {
                 addInsn.accept(new TypeInsnNode(CHECKCAST, value.getType().getInternalName()));
             }
         }
-
-        LabelNode dstLabelInsn;
-
-        if (dstInsn instanceof LabelNode labelNode0) {
-            dstLabelInsn = labelNode0;
-        }
-        else {
-            dstLabelInsn = new LabelNode();
-            frames.add(insns.indexOf(dstInsn), new Frame<>(dstFrame));
-            insns.insertBefore(dstInsn, dstLabelInsn);
-        }
-
-        addInsn.accept(new JumpInsnNode(GOTO, dstLabelInsn));
-
-        frame.init(srcFrame);
-        addInsn.accept(new LabelNode(fakeInsnsEndLabel));
-
-        if (fakeInsns.size() != fakeFrames.size())
-            throw new RuntimeException();
-
-        frames.addAll(insns.indexOf(srcInsn), fakeFrames);
-        insns.insertBefore(srcInsn, fakeInsns);
-
-        if (insns.size() != frames.size())
-            throw new RuntimeException();
     }
 
 }
